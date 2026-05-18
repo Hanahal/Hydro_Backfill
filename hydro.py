@@ -127,7 +127,70 @@ PLOTLY_LAYOUT = dict(
     margin=dict(l=55, r=35, t=55, b=55),
 )
 WARM_COLORS = ["#e8622a", "#c44a10", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6"]
- 
+
+# ── ASTM Granulometry helpers ────────────────────────────────────────────────────
+STANDARD_SIEVES_MM = [75.0, 50.0, 37.5, 25.0, 19.0, 9.5, 4.75, 2.00, 0.850, 0.425, 0.250, 0.150, 0.106, 0.075]
+STANDARD_SIEVES_LABEL = ["3\"", "2\"", "1½\"", "1\"", "¾\"", "3/8\"", "N°4", "N°10", "N°20", "N°40", "N°60", "N°100", "N°140", "N°200"]
+
+def calc_Cu(D60, D10):
+    if D10 and D10 > 0:
+        return D60 / D10
+    return None
+
+def calc_Cc(D10, D30, D60):
+    if D10 and D30 and D60 and D10 > 0 and D60 > 0:
+        return (D30 ** 2) / (D10 * D60)
+    return None
+
+def get_Dx(passing_pct, diameters_mm, x):
+    """Interpolate diameter at x% passing"""
+    pts = sorted(zip(passing_pct, diameters_mm))
+    for i in range(len(pts) - 1):
+        p1, d1 = pts[i]
+        p2, d2 = pts[i + 1]
+        if p1 <= x <= p2 and p2 > p1:
+            frac = (x - p1) / (p2 - p1)
+            return d1 + frac * (d2 - d1)
+    return None
+
+def classify_uscs(pct_fines, Cu, Cc, LL=None, PI=None):
+    """Simplified USCS classification per ASTM D2487"""
+    if pct_fines >= 50:
+        if LL is not None and PI is not None:
+            if LL < 50:
+                if PI >= 7 and PI >= 0.73 * (LL - 20):
+                    return "CL", "Arcilla magra (Lean Clay)"
+                elif PI < 4 or PI < 0.73 * (LL - 20):
+                    return "ML", "Limo (Silt)"
+                else:
+                    return "CL-ML", "Arcilla limosa (Silty Clay)"
+            else:
+                if PI >= 0.73 * (LL - 20):
+                    return "CH", "Arcilla grasa (Fat Clay)"
+                else:
+                    return "MH", "Limo elástico (Elastic Silt)"
+        return "ML/CL", "Suelo de grano fino (requiere Atterberg)"
+    else:
+        if Cu is None or Cc is None:
+            return "SP/GP", "Grano grueso — datos insuficientes"
+        well_graded_sand = Cu >= 6 and 1 <= Cc <= 3
+        if pct_fines < 5:
+            if well_graded_sand:
+                return "SW", "Arena bien graduada (Well-graded Sand)"
+            else:
+                return "SP", "Arena mal graduada (Poorly-graded Sand)"
+        elif pct_fines > 12:
+            if LL is not None and PI is not None and PI >= 4:
+                return "SC", "Arena arcillosa (Clayey Sand)"
+            else:
+                return "SM", "Arena limosa (Silty Sand)"
+        else:
+            if well_graded_sand:
+                return "SW-SM", "Arena bien graduada con limo"
+            else:
+                return "SP-SM", "Arena mal graduada con limo"
+
+# ── Shared helpers ────────────────────────────────────────────────────────────────
 def render_table(df):
     rows = "".join(
         f"<tr>{''.join(f'<td>{v}</td>' for v in row)}</tr>"
@@ -238,11 +301,11 @@ if "pulpa"   not in st.session_state: st.session_state.pulpa   = DEFAULT_PULPA.c
 if "caseron" not in st.session_state: st.session_state.caseron = DEFAULT_CASERON.copy()
 if "mezclas_df" not in st.session_state: st.session_state.mezclas_df = DEFAULT_MEZCLAS.copy()
 if "ucs_df"     not in st.session_state: st.session_state.ucs_df     = DEFAULT_UCS.copy()
- 
+
 st.markdown("""
 <div class="hero-banner">
   <h1>💧 Relleno Hidráulico (RH)</h1>
-  <p>Análisis técnico · Diseño de mezcla · Cálculos geomecánicos </p>
+  <p>Análisis técnico · Diseño de mezcla · Cálculos geomecánicos · Granulometría ASTM</p>
 </div>
 """, unsafe_allow_html=True)
  
@@ -304,8 +367,12 @@ tabs = st.tabs([
     "💪 Resistencias UCS",
     "🌊 Pulpa Hidráulica",
     "📐 Geomecánica",
+    "🪨 Granulometría",
 ])
- 
+
+# ══════════════════════════════════════════════════════════════
+# TAB 0 — Propiedades del Relave
+# ══════════════════════════════════════════════════════════════
 with tabs[0]:
     st.markdown("## Propiedades Físicas del Relave")
     relave = st.session_state.relave
@@ -388,8 +455,10 @@ with tabs[0]:
         xaxis_title="Diámetro (μm)", yaxis_title="% Pasado Acumulado",
         )
     st.plotly_chart(fig_gran, use_container_width=True)
- 
- 
+
+# ══════════════════════════════════════════════════════════════
+# TAB 1 — Diseño de Mezcla
+# ══════════════════════════════════════════════════════════════
 with tabs[1]:
     st.markdown("## Diseño del Relleno Hidráulico — Dosificaciones")
     mezclas = st.session_state.mezclas_df.copy()
@@ -462,8 +531,10 @@ with tabs[1]:
         • Ambos alcanzan 25–30 MPa a los 28 días.
         </div>
         """, unsafe_allow_html=True)
- 
- 
+
+# ══════════════════════════════════════════════════════════════
+# TAB 2 — Resistencias UCS
+# ══════════════════════════════════════════════════════════════
 with tabs[2]:
     st.markdown("## Curvas de Resistencia a la Compresión Simple (UCS)")
     ucs_df = st.session_state.ucs_df.copy()
@@ -505,8 +576,10 @@ with tabs[2]:
     fig_28.update_layout(**PLOTLY_LAYOUT, height=360,
         title=dict(text="Resistencia a 28 días por Especímen", font=dict(size=14)))
     st.plotly_chart(fig_28, use_container_width=True)
- 
- 
+
+# ══════════════════════════════════════════════════════════════
+# TAB 3 — Pulpa Hidráulica
+# ══════════════════════════════════════════════════════════════
 with tabs[3]:
     st.markdown("## Pulpa de Relleno Hidráulico")
     pulpa  = st.session_state.pulpa
@@ -600,8 +673,10 @@ with tabs[3]:
         title=dict(text="Viscosidad Dinámica vs % Sólidos en Volumen", font=dict(size=14)),
         xaxis_title="Cv (%)", yaxis_title="μm (Pa·s)")
     st.plotly_chart(fig_visc, use_container_width=True)
- 
- 
+
+# ══════════════════════════════════════════════════════════════
+# TAB 4 — Geomecánica
+# ══════════════════════════════════════════════════════════════
 with tabs[4]:
     st.markdown("## Cálculos Geomecánicos del Caserón")
     caseron = st.session_state.caseron
@@ -700,8 +775,8 @@ with tabs[4]:
     vals_28     = ucs_df["Dia28_MPa"].tolist()
     colores     = ["#10b981" if v >= UCS_RH else "#e8622a" for v in vals_28]
  
-    fig_comp = go.Figure()
-    fig_comp.add_trace(go.Bar(
+    fig_comp_geo = go.Figure()
+    fig_comp_geo.add_trace(go.Bar(
         x=especimenes, y=vals_28,
         marker_color=colores,
         text=[f"{v:.3f}" for v in vals_28],
@@ -709,257 +784,642 @@ with tabs[4]:
         textfont=dict(size=12),
         name="UCS 28d"
     ))
-    fig_comp.add_hline(y=UCS_RH, line_dash="dash", line_color="#f59e0b", line_width=2.5,
+    fig_comp_geo.add_hline(y=UCS_RH, line_dash="dash", line_color="#f59e0b", line_width=2.5,
                        annotation_text=f"UCS_RH requerido = {UCS_RH:.3f} MPa",
                        annotation_font_color="#8b3a00", annotation_font_size=12)
-    fig_comp.update_layout(**PLOTLY_LAYOUT, height=360,
+    fig_comp_geo.update_layout(**PLOTLY_LAYOUT, height=360,
         title=dict(text="UCS a 28 días — Verde: cumple, Naranja: no cumple", font=dict(size=14)))
-    st.plotly_chart(fig_comp, use_container_width=True)
+    st.plotly_chart(fig_comp_geo, use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════════════
-    #  REPORTE PDF — GEOMECÁNICA
-    # ══════════════════════════════════════════════════════════════════
-    section_hdr("📄 Exportar Reporte Geomecánico")
+# ══════════════════════════════════════════════════════════════
+# TAB 5 — Granulometría ASTM D2487 / D6913 / D1140
+# ══════════════════════════════════════════════════════════════
+with tabs[5]:
+    st.markdown("## 🪨 Análisis Granulométrico — ASTM D6913 / D2487 / D1140")
     st.markdown("""
     <div class="info-box">
-    Genera un reporte PDF completo con todos los parámetros, tablas de resultados
-    y gráficos de esta sección (Distribución de Presiones y Comparativa UCS 28d).
+    Ingrese los datos del análisis granulométrico conforme a <b>ASTM D6913-17</b> (tamizado),
+    <b>ASTM D1140-00</b> (finos por lavado) y clasifique según <b>ASTM D2487-17</b>
+    (Sistema Unificado de Clasificación de Suelos — SUCS).
+    Los datos del relave ingresados en el módulo principal se usan como referencia inicial.
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("📥 Generar Reporte PDF — Geomecánica", use_container_width=True):
+    relave_g = st.session_state.relave
+
+    # ── Datos del espécimen ──────────────────────────────────
+    section_hdr("1. Datos del Espécimen — ASTM D6913 Método A")
+    cg1, cg2, cg3 = st.columns(3)
+    with cg1:
+        masa_seca_total = st.number_input("Masa seca espécimen S,Md (g)", value=500.0, min_value=1.0, step=1.0, key="gran_masa")
+        masa_lavado     = st.number_input("Masa retenida tamiz N°200 tras lavado (g)", value=410.0, min_value=0.0, step=0.1, key="gran_lavado")
+    with cg2:
+        d80_ref = float(relave_g["d80_micrones"])
+        st.markdown(f"""
+        <div class="info-box">
+        <b>Referencia del Relave:</b><br>
+        d80 = {d80_ref:.0f} μm (del módulo Propiedades del Relave)<br>
+        GE Relave = {relave_g['GE_relave']:.2f}<br>
+        Estos valores se usan para complementar el análisis.
+        </div>
+        """, unsafe_allow_html=True)
+    with cg3:
+        st.markdown("""
+        <div class="info-box">
+        <b>ASTM D1140 — Finos por lavado:</b><br>
+        %Finos = [(S,Md − M_lavado) / S,Md] × 100<br><br>
+        <b>ASTM D6913 — Porcentaje pasante:</b><br>
+        PP_N = 100 × (1 − CMR_N / S,Md)
+        </div>
+        """, unsafe_allow_html=True)
+
+    pct_finos_lavado = ((masa_seca_total - masa_lavado) / masa_seca_total) * 100
+    st.markdown(result_highlight(
+        "% Material < N°200 por lavado (ASTM D1140)",
+        f"{pct_finos_lavado:.2f} %"
+    ), unsafe_allow_html=True)
+
+    # ── Tamices normalizados D6913 ──────────────────────────
+    section_hdr("2. Ingreso de Masas Retenidas por Tamiz — ASTM D6913")
+    st.markdown("Ingrese la **masa acumulada retenida** (CMR_N) en cada tamiz (desde el más grueso):")
+
+    sieve_labels = STANDARD_SIEVES_LABEL
+    sieve_mm     = STANDARD_SIEVES_MM
+
+    default_cmr = [0.0, 0.0, 0.0, 0.0, 0.0, 2.5, 8.0, 25.0, 65.0, 150.0, 260.0, 360.0, 420.0, 450.0]
+
+    sieve_input_cols = st.columns(4)
+    cmr_values = []
+    for i, (slabel, smm) in enumerate(zip(sieve_labels, sieve_mm)):
+        col_idx = i % 4
+        with sieve_input_cols[col_idx]:
+            val = st.number_input(
+                f"CMR — {slabel} ({smm} mm) [g]",
+                value=float(default_cmr[i]),
+                min_value=0.0,
+                max_value=float(masa_seca_total),
+                step=0.1,
+                key=f"cmr_{i}"
+            )
+            cmr_values.append(val)
+
+    # ── Calculations per ASTM D6913 ─────────────────────────
+    pp_values = []
+    mr_values = []
+    for i, cmr in enumerate(cmr_values):
+        pp = 100.0 * (1.0 - cmr / masa_seca_total)
+        pp_values.append(max(0.0, min(100.0, pp)))
+        if i == 0:
+            mr_values.append(cmr)
+        else:
+            mr_values.append(cmr - cmr_values[i-1])
+
+    # ── Results table ────────────────────────────────────────
+    section_hdr("3. Tabla de Resultados — Porcentaje Pasante Acumulado")
+    df_gran = pd.DataFrame({
+        "Tamiz": sieve_labels,
+        "Abertura (mm)": sieve_mm,
+        "CMR_N (g)": [f"{v:.2f}" for v in cmr_values],
+        "MR_N (g)": [f"{v:.2f}" for v in mr_values],
+        "% Ret. Acum.": [f"{(cmr/masa_seca_total*100):.1f}" for cmr in cmr_values],
+        "% Pasante PP_N": [f"{pp:.1f}" for pp in pp_values],
+    })
+    st.markdown(render_table(df_gran), unsafe_allow_html=True)
+
+    # ── Grain size curve ─────────────────────────────────────
+    section_hdr("4. Curva Granulométrica — ASTM D6913 / D2487")
+    fig_gran_astm = go.Figure()
+
+    fig_gran_astm.add_trace(go.Scatter(
+        x=sieve_mm, y=pp_values,
+        mode="lines+markers",
+        line=dict(color="#e8622a", width=3),
+        marker=dict(size=8, color="#c44a10", line=dict(color="white", width=1.5)),
+        fill="tozeroy", fillcolor="rgba(232,98,42,0.08)",
+        name="% Pasante acumulado"
+    ))
+
+    fig_gran_astm.add_vline(
+        x=d80_ref / 1000,
+        line_dash="dash", line_color="#f59e0b",
+        annotation_text=f"d80={d80_ref:.0f}µm (Relave)",
+        annotation_font_color="#8b3a00"
+    )
+    fig_gran_astm.add_vline(x=4.75,  line_dash="dot", line_color="#a08060", line_width=1,
+                             annotation_text="N°4 (4.75mm)", annotation_font_color="#a08060", annotation_position="top right")
+    fig_gran_astm.add_vline(x=0.075, line_dash="dot", line_color="#a08060", line_width=1,
+                             annotation_text="N°200 (0.075mm)", annotation_font_color="#a08060", annotation_position="top left")
+    fig_gran_astm.add_hline(y=50, line_dash="dot", line_color="#c07050", line_width=1,
+                             annotation_text="50% pasante", annotation_font_color="#c07050")
+
+    fig_gran_astm.update_layout(**PLOTLY_LAYOUT, height=420,
+        title=dict(text="Curva de Distribución Granulométrica — ASTM D6913", font=dict(size=14))
+    )
+    st.plotly_chart(fig_gran_astm, use_container_width=True)
+
+    # ── D10 / D30 / D60 and Coefficients ────────────────────
+    section_hdr("5. Diámetros Característicos y Coeficientes — ASTM D2487")
+
+    D10 = get_Dx(pp_values, sieve_mm, 10)
+    D30 = get_Dx(pp_values, sieve_mm, 30)
+    D50 = get_Dx(pp_values, sieve_mm, 50)
+    D60 = get_Dx(pp_values, sieve_mm, 60)
+    D80 = get_Dx(pp_values, sieve_mm, 80)
+
+    Cu_calc = calc_Cu(D60, D10) if (D60 and D10) else None
+    Cc_calc = calc_Cc(D10, D30, D60) if (D10 and D30 and D60) else None
+
+    cg_d1, cg_d2 = st.columns(2)
+    with cg_d1:
+        df_diams = pd.DataFrame({
+            "Parámetro": ["D10 (mm)", "D30 (mm)", "D50 (mm)", "D60 (mm)", "D80 (mm)",
+                          "Cu = D60/D10", "Cc = D30²/(D10·D60)"],
+            "Valor": [
+                f"{D10:.4f}" if D10 else "—",
+                f"{D30:.4f}" if D30 else "—",
+                f"{D50:.4f}" if D50 else "—",
+                f"{D60:.4f}" if D60 else "—",
+                f"{D80:.4f}" if D80 else "—",
+                f"{Cu_calc:.2f}" if Cu_calc else "—",
+                f"{Cc_calc:.2f}" if Cc_calc else "—",
+            ],
+        })
+        st.markdown(render_table(df_diams), unsafe_allow_html=True)
+
+    with cg_d2:
+        section_hdr("Clasificación SUCS — ASTM D2487")
+        st.markdown("**Límites de Atterberg (para clasificación de finos):**")
+        ll_val = st.number_input("Límite Líquido LL (%)", value=0.0, min_value=0.0, max_value=200.0, step=0.5, key="gran_LL")
+        pi_val = st.number_input("Índice de Plasticidad PI (%)", value=0.0, min_value=0.0, max_value=100.0, step=0.5, key="gran_PI")
+
+        ll_in = ll_val if ll_val > 0 else None
+        pi_in = pi_val if pi_val > 0 else None
+
+        sym_uscs, name_uscs = classify_uscs(pct_finos_lavado, Cu_calc, Cc_calc, ll_in, pi_in)
+
+        st.markdown(f"""
+        <div class="result-highlight">
+            <div class="label">📌 Símbolo SUCS (ASTM D2487)</div>
+            <div class="value">{sym_uscs}</div>
+        </div>
+        <div class="info-box" style="margin-top:8px;">
+        <b>Nombre del grupo:</b> {name_uscs}<br>
+        <b>% finos (< N°200):</b> {pct_finos_lavado:.1f}%<br>
+        <b>Cu:</b> {f"{Cu_calc:.2f}" if Cu_calc else "—"} &nbsp;|&nbsp; <b>Cc:</b> {f"{Cc_calc:.2f}" if Cc_calc else "—"}
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── ASTM D1140 Fines detail ──────────────────────────────
+    section_hdr("6. Análisis de Finos por Lavado — ASTM D1140")
+    cg_f1, cg_f2 = st.columns(2)
+    with cg_f1:
+        df_finos = pd.DataFrame({
+            "Parámetro": [
+                "Masa seca inicial S,Md (g)",
+                "Masa retenida N°200 tras lavado (g)",
+                "Masa finos por lavado (g)",
+                "% Finos por lavado (A = [(B-C)/B]×100)",
+            ],
+            "Valor": [
+                f"{masa_seca_total:.2f}",
+                f"{masa_lavado:.2f}",
+                f"{masa_seca_total - masa_lavado:.2f}",
+                f"{pct_finos_lavado:.2f}%",
+            ],
+        })
+        st.markdown(render_table(df_finos), unsafe_allow_html=True)
+
+    with cg_f2:
+        st.markdown("""
+        <div class="info-box">
+        <b>ASTM D1140 Método A — Procedimiento:</b><br>
+        1. Secar espécimen a 110 ± 5°C hasta masa constante.<br>
+        2. Lavar sobre tamiz N°200 (75 µm) con agua a temperatura ambiente.<br>
+        3. Continuar hasta que el agua de lavado salga clara.<br>
+        4. Secar el retenido en N°200 y determinar su masa.<br>
+        5. % finos = [(B − C) / B] × 100<br><br>
+        <b>Criterio de aceptación:</b> La diferencia entre dos ensayos no debe
+        exceder el límite D2S de precisión según tipo de suelo (ASTM D1140).
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── Fracciones granulométricas ───────────────────────────
+    section_hdr("7. Distribución por Fracciones Granulométricas")
+
+    def get_pp_at_mm(target_mm):
+        pts = sorted(zip(sieve_mm, pp_values))
+        for j in range(len(pts)-1):
+            d1, p1 = pts[j]
+            d2, p2 = pts[j+1]
+            if d1 <= target_mm <= d2 and d2 > d1:
+                frac = (target_mm - d1) / (d2 - d1)
+                return p1 + frac * (p2 - p1)
+        if target_mm >= pts[-1][0]: return pts[-1][1]
+        if target_mm <= pts[0][0]: return pts[0][1]
+        return None
+
+    pp_4_75  = get_pp_at_mm(4.75)
+    pp_0_075 = get_pp_at_mm(0.075)
+
+    pct_grava = 100.0 - pp_4_75  if pp_4_75  is not None else None
+    pct_arena = (pp_4_75 - pp_0_075) if (pp_4_75 is not None and pp_0_075 is not None) else None
+    pct_finos_sieve = pp_0_075 if pp_0_075 is not None else pct_finos_lavado
+
+    cg_fr1, cg_fr2 = st.columns(2)
+    with cg_fr1:
+        df_frac = pd.DataFrame({
+            "Fracción": ["Grava (> 4.75 mm)", "Arena (0.075–4.75 mm)", "Finos (< 0.075 mm)"],
+            "%": [
+                f"{pct_grava:.1f}" if pct_grava is not None else "—",
+                f"{pct_arena:.1f}" if pct_arena is not None else "—",
+                f"{pct_finos_sieve:.1f}",
+            ],
+        })
+        st.markdown(render_table(df_frac), unsafe_allow_html=True)
+
+    with cg_fr2:
+        if pct_grava is not None and pct_arena is not None:
+            fig_pie = go.Figure(go.Pie(
+                labels=["Grava", "Arena", "Finos"],
+                values=[max(0, pct_grava), max(0, pct_arena), max(0, pct_finos_sieve)],
+                marker_colors=["#e8622a", "#f59e0b", "#c44a10"],
+                textfont=dict(size=13),
+                hole=0.35,
+            ))
+            fig_pie.update_layout(**PLOTLY_LAYOUT, height=280,
+                title=dict(text="Distribución por Fracciones", font=dict(size=13))
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    # ── Carta de plasticidad ─────────────────────────────────
+    if ll_in is not None and pi_in is not None:
+        section_hdr("8. Carta de Plasticidad — ASTM D2487 (Fig. 4)")
+        fig_plast = go.Figure()
+
+        ll_range = np.linspace(16, 120, 200)
+        pi_Aline = 0.73 * (ll_range - 20)
+        pi_Aline = np.maximum(pi_Aline, 4)
+        pi_Uline = 0.9 * (ll_range - 8)
+
+        fig_plast.add_trace(go.Scatter(x=ll_range, y=pi_Aline, mode="lines",
+            line=dict(color="#c44a10", width=2, dash="dash"), name='Línea "A"'))
+        fig_plast.add_trace(go.Scatter(x=ll_range, y=pi_Uline, mode="lines",
+            line=dict(color="#f59e0b", width=1.5, dash="dot"), name='Línea "U"'))
+
+        fig_plast.add_annotation(x=30, y=8, text="CL o OL", font=dict(color="#e8622a", size=11), showarrow=False)
+        fig_plast.add_annotation(x=65, y=30, text="CH u OH", font=dict(color="#e8622a", size=11), showarrow=False)
+        fig_plast.add_annotation(x=65, y=8, text="MH u OH", font=dict(color="#8b5e3c", size=11), showarrow=False)
+        fig_plast.add_annotation(x=30, y=2, text="ML u OL", font=dict(color="#8b5e3c", size=11), showarrow=False)
+
+        fig_plast.add_trace(go.Scatter(
+            x=[ll_in], y=[pi_in],
+            mode="markers",
+            marker=dict(size=14, color="#e8622a", symbol="star", line=dict(color="white", width=2)),
+            name=f"Muestra (LL={ll_in}, PI={pi_in})"
+        ))
+
+        fig_plast.update_layout(**PLOTLY_LAYOUT, height=380,
+            title=dict(text="Carta de Plasticidad — ASTM D2487 Figura 4", font=dict(size=14)),
+            xaxis_title="Límite Líquido (LL)",
+            yaxis_title="Índice de Plasticidad (PI)",
+            xaxis=dict(range=[0, 120], gridcolor="#f0d5c0", linecolor="#e0b090"),
+            yaxis=dict(range=[0, 70],  gridcolor="#f0d5c0", linecolor="#e0b090"),
+        )
+        st.plotly_chart(fig_plast, use_container_width=True)
+
+    # ── Summary & criteria ───────────────────────────────────
+    section_hdr("9. Resumen y Criterios de Clasificación SUCS")
+    crit_well_sand  = "✅" if (Cu_calc and Cu_calc >= 6 and Cc_calc and 1 <= Cc_calc <= 3) else "❌"
+    crit_fine       = "✅" if pct_finos_lavado >= 50 else "❌"
+    crit_coarse     = "✅" if pct_finos_lavado < 50 else "❌"
+
+    df_criteria = pd.DataFrame({
+        "Criterio ASTM D2487": [
+            "% finos (lavado) < 50% → Suelo grano grueso",
+            "% finos (lavado) ≥ 50% → Suelo grano fino",
+            "Arena bien graduada: Cu ≥ 6 y 1 ≤ Cc ≤ 3",
+            f"Cu = D60/D10 (calculado)",
+            f"Cc = D30²/(D10·D60) (calculado)",
+        ],
+        "Resultado": [
+            f"{crit_coarse} ({pct_finos_lavado:.1f}% finos)",
+            f"{crit_fine}  ({pct_finos_lavado:.1f}% finos)",
+            f"{crit_well_sand}",
+            f"{Cu_calc:.2f}" if Cu_calc else "—",
+            f"{Cc_calc:.2f}" if Cc_calc else "—",
+        ],
+    })
+    st.markdown(render_table(df_criteria), unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="info-box" style="margin-top:12px;">
+    <b>Clasificación final SUCS:</b> <span style="color:#e8622a; font-size:18px; font-weight:700;">{sym_uscs}</span> — {name_uscs}<br><br>
+    <b>Referencia del relave (módulo principal):</b> d80 = {d80_ref:.0f} µm → Finos predominantes, típico suelo ML/CL en SUCS.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    # PDF REPORT
+    # ══════════════════════════════════════════════════════════
+    st.markdown("---")
+    section_hdr("📄 Exportar Reporte Técnico Completo — PDF")
+    st.markdown("""
+    <div class="info-box">
+    Genera un reporte PDF completo incluyendo: parámetros del relave, diseño de mezcla, UCS, pulpa hidráulica,
+    geomecánica (Mitchell) y análisis granulométrico ASTM.
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("📥 Generar Reporte PDF Completo", use_container_width=True):
         import io as _io
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib import colors
-        from reportlab.lib.units import cm
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                        Table, TableStyle, Image as RLImage,
-                                        HRFlowable, KeepTogether)
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-
-        # ── helper: Plotly fig → ReportLab Image ──────────────────────
-        def fig_to_rli(fig, w_cm=15.5, h_cm=8.5):
-            buf = _io.BytesIO()
-            fig.write_image(buf, format="png", width=950, height=520, scale=2)
-            buf.seek(0)
-            return RLImage(buf, width=w_cm*cm, height=h_cm*cm)
-
-        # ── Layout para exportar (fondo blanco) ───────────────────────
-        LP = dict(
-            paper_bgcolor="white", plot_bgcolor="#f5f5f5",
-            font=dict(family="Arial, sans-serif", color="#2d1b00", size=13),
-            margin=dict(l=55, r=35, t=60, b=55),
-        )
-
-        # Gráfico 1 — Distribución de Presiones
-        fig_g1 = go.Figure()
-        fig_g1.add_trace(go.Scatter(
-            x=pv_arr, y=z_arr, mode="lines", fill="tozerox",
-            fillcolor="rgba(232,98,42,0.2)",
-            line=dict(color="#e8622a", width=3),
-            name="Presión vertical (t/m²)"
-        ))
-        fig_g1.add_vline(x=UCS_RH, line_dash="dash", line_color="#10b981",
-                         annotation_text=f"UCS_RH = {UCS_RH:.3f} MPa",
-                         annotation_font_color="#1a7a40")
-        fig_g1.update_layout(**LP, height=520,
-            title=dict(text="Distribución de Presión Vertical en el Relleno", font=dict(size=15)),
-            xaxis_title="Presión vertical γ·z (t/m²)", yaxis_title="Profundidad z (m)")
-
-        # Gráfico 2 — Barras UCS 28d
-        fig_g2 = go.Figure()
-        fig_g2.add_trace(go.Bar(
-            x=especimenes, y=vals_28, marker_color=colores,
-            text=[f"{v:.3f}" for v in vals_28], textposition="outside",
-            name="UCS 28d (MPa)"
-        ))
-        fig_g2.add_hline(y=UCS_RH, line_dash="dash", line_color="#f59e0b", line_width=2.5,
-                         annotation_text=f"UCS_RH req. = {UCS_RH:.3f} MPa",
-                         annotation_font_color="#8b3a00")
-        fig_g2.update_layout(**LP, height=520,
-            title=dict(text="UCS a 28 días por Especimen vs Requerimiento", font=dict(size=15)),
-            yaxis_title="UCS (MPa)")
-
-        # ── Estilos ReportLab ──────────────────────────────────────────
-        styles = getSampleStyleSheet()
-
-        def ps(name, base="Normal", **kw):
-            return ParagraphStyle(name, parent=styles[base], **kw)
-
-        S_TITLE = ps("rh_title", "Title", fontSize=20,
-                     textColor=colors.HexColor("#8b3a00"),
-                     fontName="Helvetica-Bold", spaceAfter=2)
-        S_SUB   = ps("rh_sub", fontSize=10,
-                     textColor=colors.HexColor("#b07050"),
-                     fontName="Helvetica-Oblique", spaceAfter=10)
-        S_H2    = ps("rh_h2", fontSize=12,
-                     textColor=colors.HexColor("#7a2e00"),
-                     fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=5)
-        S_BODY  = ps("rh_body", fontSize=9.5,
-                     textColor=colors.HexColor("#3d1a00"),
-                     fontName="Helvetica", leading=14)
-        S_NOTE  = ps("rh_note", fontSize=8.5,
-                     textColor=colors.HexColor("#7a4010"),
-                     fontName="Helvetica-Oblique", leading=12)
-        S_RIGHT = ps("rh_right", fontSize=8,
-                     textColor=colors.HexColor("#a06040"),
-                     fontName="Helvetica", alignment=TA_RIGHT)
-
-        # ── Estilo de tabla ────────────────────────────────────────────
-        TS = TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0), colors.HexColor("#8b3a00")),
-            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
-            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE",      (0, 0), (-1, 0), 9),
-            ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-            ("ROWBACKGROUNDS",(0, 1), (-1, -1),
-             [colors.HexColor("#fff8f3"), colors.white]),
-            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
-            ("FONTSIZE",      (0, 1), (-1, -1), 9),
-            ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e0c0a0")),
-            ("TOPPADDING",    (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
-        ])
-
-        def make_tbl(rows, col_w=None):
-            t = Table(rows, colWidths=col_w)
-            t.setStyle(TS)
-            return t
-
-        def hr():
-            return HRFlowable(width="100%", thickness=1.5,
-                              color=colors.HexColor("#e8622a"),
-                              spaceAfter=8, spaceBefore=2)
-
-        # ── Construir historia ─────────────────────────────────────────
-        buf_pdf = _io.BytesIO()
-        doc = SimpleDocTemplate(buf_pdf, pagesize=A4,
-                                leftMargin=2.2*cm, rightMargin=2.2*cm,
-                                topMargin=2*cm, bottomMargin=2*cm)
-        story = []
-        hoy_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")
-
-        # Cabecera
-        story.append(Paragraph("Relleno Hidraulico (RH)", S_TITLE))
-        story.append(Paragraph("Reporte Geomecanico — Analisis Tecnico-Geotecnico", S_SUB))
-        story.append(hr())
-        story.append(Paragraph(
-            f"Fecha: {hoy_str}     Autor: Bradoc Chambilla", S_NOTE))
-        story.append(Spacer(1, 0.5*cm))
-
-        # ── Sección 1: Parámetros del Caserón ─────────────────────────
-        story.append(Paragraph("1. Parametros del Caseron", S_H2))
-        story.append(hr())
-        data1 = [
-            ["Parametro", "Valor"],
-            ["Longitud L (m)",   f"{L:.1f}"],
-            ["Ancho W (m)",      f"{W:.1f}"],
-            ["Altura H (m)",     f"{H:.1f}"],
-            ["Densidad RH (t/m3)", f"{gRH:.2f}"],
-            ["Angulo friccion (deg)", f"{phi:.1f}"],
-        ]
-        story.append(make_tbl(data1, col_w=[9.5*cm, 6.5*cm]))
-        story.append(Spacer(1, 0.2*cm))
-        story.append(Paragraph(
-            f"Configuracion detectada: W = {W:.1f} m | H = {H:.1f} m  →  Caso {caso}", S_BODY))
-
-        # ── Sección 2: Resistencia Requerida ──────────────────────────
-        story.append(Spacer(1, 0.4*cm))
-        story.append(Paragraph("2. Resistencia Requerida — UCS_RH (Mitchell)", S_H2))
-        story.append(hr())
-        data2 = [
-            ["Concepto", "Valor"],
-            ["Caso geometrico",    f"Caso {caso}"],
-            ["Formula aplicada",   formula],
-            ["UCS_RH calculado (MPa)", f"{UCS_RH:.4f}"],
-            ["Angulo de falla alfa (deg)", f"{alpha:.1f}"],
-            ["Cohesion requerida c (MPa)", f"{cohesion:.4f}"],
-        ]
-        story.append(make_tbl(data2, col_w=[9.5*cm, 6.5*cm]))
-        story.append(Spacer(1, 0.25*cm))
-        data3 = [
-            ["Concepto", "Valor"],
-            ["Angulo friccion phi (deg)", f"{phi:.1f}"],
-            ["Angulo falla alfa (deg)",   f"{alpha:.1f}"],
-            ["Densidad RH (t/m3)",       f"{gRH:.2f}"],
-            ["Altura caseron H (m)",     f"{H:.1f}"],
-            ["Peso cuna Wn (t)",         f"{Wn:.1f}"],
-        ]
-        story.append(make_tbl(data3, col_w=[9.5*cm, 6.5*cm]))
-
-        # ── Sección 3: Verificación UCS ───────────────────────────────
-        story.append(Spacer(1, 0.4*cm))
-        story.append(Paragraph("3. Verificacion contra UCS Ensayado (28 dias)", S_H2))
-        story.append(hr())
-        data4 = [
-            ["Metrica", "Valor"],
-            ["UCS requerido (MPa)",     f"{UCS_RH:.3f}"],
-            ["UCS maximo 28d (MPa)",    f"{ucs_max:.3f}"],
-            ["UCS promedio 28d (MPa)",  f"{ucs_mean:.3f}"],
-            ["Factor UCS_ens / UCS_req",
-             f"{factor:.2f}  |  {'CUMPLE' if factor >= 1.0 else 'NO CUMPLE'}"],
-        ]
-        story.append(make_tbl(data4, col_w=[9.5*cm, 6.5*cm]))
-
-        # Tabla detallada por espécimen
-        story.append(Spacer(1, 0.25*cm))
-        story.append(Paragraph("Detalle por especimen:", S_BODY))
-        ucs_local = st.session_state.ucs_df.copy()
-        header_u = [["Especimen", "Dia 7 (MPa)", "Dia 14 (MPa)", "Dia 28 (MPa)", "Cumple?"]]
-        rows_u = [
-            [r["Especimen"], f"{r['Dia7_MPa']:.3f}", f"{r['Dia14_MPa']:.3f}",
-             f"{r['Dia28_MPa']:.3f}",
-             "SI" if r["Dia28_MPa"] >= UCS_RH else "NO"]
-            for _, r in ucs_local.iterrows()
-        ]
-        story.append(make_tbl(
-            header_u + rows_u,
-            col_w=[4.5*cm, 3*cm, 3*cm, 3.2*cm, 2.3*cm]
-        ))
-
-        # ── Sección 4: Gráficos ────────────────────────────────────────
-        story.append(Spacer(1, 0.5*cm))
-        story.append(Paragraph("4. Graficos Geomecanicos", S_H2))
-        story.append(hr())
-
         try:
-            story.append(Paragraph(
-                "4.1  Distribucion de Presion Vertical en el Relleno", S_BODY))
-            story.append(Spacer(1, 0.2*cm))
-            story.append(fig_to_rli(fig_g1, w_cm=15.5, h_cm=8.5))
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.units import cm
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                            Table, TableStyle, Image as RLImage,
+                                            HRFlowable, KeepTogether, PageBreak)
+            from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+            def fig_to_rli(fig, w_cm=15.5, h_cm=8.0):
+                buf = _io.BytesIO()
+                fig.write_image(buf, format="png", width=950, height=490, scale=2)
+                buf.seek(0)
+                return RLImage(buf, width=w_cm*cm, height=h_cm*cm)
+
+            LP = dict(
+                paper_bgcolor="white", plot_bgcolor="#f5f5f5",
+                font=dict(family="Arial, sans-serif", color="#2d1b00", size=12),
+                margin=dict(l=55, r=35, t=55, b=50),
+            )
+
+            styles = getSampleStyleSheet()
+            def ps(name, base="Normal", **kw):
+                return ParagraphStyle(name, parent=styles[base], **kw)
+
+            S_TITLE = ps("rh_title", "Title", fontSize=20,
+                         textColor=colors.HexColor("#8b3a00"),
+                         fontName="Helvetica-Bold", spaceAfter=2)
+            S_SUB   = ps("rh_sub", fontSize=10,
+                         textColor=colors.HexColor("#b07050"),
+                         fontName="Helvetica-Oblique", spaceAfter=10)
+            S_H2    = ps("rh_h2", fontSize=12,
+                         textColor=colors.HexColor("#7a2e00"),
+                         fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=5)
+            S_H3    = ps("rh_h3", fontSize=10,
+                         textColor=colors.HexColor("#9a4e00"),
+                         fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=3)
+            S_BODY  = ps("rh_body", fontSize=9.5,
+                         textColor=colors.HexColor("#3d1a00"),
+                         fontName="Helvetica", leading=14)
+            S_NOTE  = ps("rh_note", fontSize=8.5,
+                         textColor=colors.HexColor("#7a4010"),
+                         fontName="Helvetica-Oblique", leading=12)
+            S_RIGHT = ps("rh_right", fontSize=8,
+                         textColor=colors.HexColor("#a06040"),
+                         fontName="Helvetica", alignment=TA_RIGHT)
+
+            TS = TableStyle([
+                ("BACKGROUND",    (0, 0), (-1, 0), colors.HexColor("#8b3a00")),
+                ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+                ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE",      (0, 0), (-1, 0), 9),
+                ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+                ("ROWBACKGROUNDS",(0, 1), (-1, -1),
+                 [colors.HexColor("#fff8f3"), colors.white]),
+                ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE",      (0, 1), (-1, -1), 9),
+                ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e0c0a0")),
+                ("TOPPADDING",    (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 7),
+            ])
+
+            def make_tbl(rows, col_w=None):
+                t = Table(rows, colWidths=col_w)
+                t.setStyle(TS)
+                return t
+
+            def hr():
+                return HRFlowable(width="100%", thickness=1.5,
+                                  color=colors.HexColor("#e8622a"),
+                                  spaceAfter=6, spaceBefore=2)
+
+            buf_pdf = _io.BytesIO()
+            doc = SimpleDocTemplate(buf_pdf, pagesize=A4,
+                                    leftMargin=2.2*cm, rightMargin=2.2*cm,
+                                    topMargin=2*cm, bottomMargin=2*cm)
+            story = []
+            hoy_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")
+
+            # ── Cover
+            story.append(Paragraph("Relleno Hidraulico (RH)", S_TITLE))
+            story.append(Paragraph("Reporte Tecnico Completo — Analisis Geotecnico y Granulometria ASTM", S_SUB))
+            story.append(hr())
+            story.append(Paragraph(f"Fecha: {hoy_str}     Autor: Bradoc Chambilla", S_NOTE))
+            story.append(Spacer(1, 0.4*cm))
+
+            # ── Section 1: Relave properties
+            story.append(Paragraph("1. Propiedades del Relave", S_H2))
+            story.append(hr())
+            rev = st.session_state.relave
+            pul = st.session_state.pulpa
+            Q_rep = (float(pul["caudal_litros"]) / float(pul["tiempo_seg"])) * 86400 / 1000
+            Cv_rep = float(pul["Cw_pct_solidos_peso"]) * float(pul["SGm_pulpa"]) / float(rev["GE_relave"]) / 100
+            data_rev = [
+                ["Parametro", "Valor"],
+                ["Gravedad Especifica (GE)", f"{rev['GE_relave']:.2f}"],
+                ["d80 (µm)", f"{rev['d80_micrones']:.0f}"],
+                ["pH", f"{rev['pH']:.1f}"],
+                ["% Azufre (FRX)", f"{rev['pct_azufre']:.2f}%"],
+                ["% Arsenico (FRX)", f"{rev['pct_arsenico']:.2f}%"],
+                ["SGm pulpa", f"{float(pul['SGm_pulpa']):.3f}"],
+                ["Cw % solidos peso", f"{float(pul['Cw_pct_solidos_peso']):.2f}%"],
+                ["Cv % solidos volumen", f"{Cv_rep*100:.2f}%"],
+                ["Caudal estimado (m3/dia)", f"{Q_rep:.1f}"],
+            ]
+            story.append(make_tbl(data_rev, col_w=[10*cm, 6*cm]))
+
+            # ── Section 2: Mix design summary
+            story.append(Spacer(1, 0.4*cm))
+            story.append(Paragraph("2. Dosificaciones de Mezcla", S_H2))
+            story.append(hr())
+            mz = st.session_state.mezclas_df.copy()
+            mz["Total"] = mz["Cemento_kg"] + mz["Relave_kg"] + mz["Agua_kg"] + mz["Aditivos_kg"]
+            mix_header = [["Mezcla", "Cemento (kg)", "Relave (kg)", "Agua (kg)", "Aditivos (kg)", "Total (kg)"]]
+            mix_rows = [[r["Mezcla"], f"{r['Cemento_kg']:.0f}", f"{r['Relave_kg']:.2f}",
+                         f"{r['Agua_kg']:.0f}", f"{r['Aditivos_kg']:.2f}", f"{r['Total']:.2f}"]
+                        for _, r in mz.iterrows()]
+            story.append(make_tbl(mix_header + mix_rows,
+                                  col_w=[2.5*cm, 2.8*cm, 2.8*cm, 2.5*cm, 2.8*cm, 2.6*cm]))
+
+            # ── Section 3: UCS
+            story.append(Spacer(1, 0.4*cm))
+            story.append(Paragraph("3. Resistencias UCS", S_H2))
+            story.append(hr())
+            ucs_r = st.session_state.ucs_df.copy()
+            ucs_header = [["Especimen", "Dia 7 (MPa)", "Dia 14 (MPa)", "Dia 28 (MPa)"]]
+            ucs_rows = [[r["Especimen"], f"{r['Dia7_MPa']:.3f}", f"{r['Dia14_MPa']:.3f}", f"{r['Dia28_MPa']:.3f}"]
+                        for _, r in ucs_r.iterrows()]
+            story.append(make_tbl(ucs_header + ucs_rows, col_w=[4.5*cm, 3.5*cm, 3.5*cm, 3.5*cm]))
+
+            # ── Section 4: Geomechanics
+            story.append(PageBreak())
+            story.append(Paragraph("4. Calculo Geomecanico — UCS_RH (Mitchell)", S_H2))
+            story.append(hr())
+            cas = st.session_state.caseron
+            L_r = float(cas["longitud_m"]); W_r = float(cas["ancho_m"])
+            H_r = float(cas["altura_m"]);   g_r = float(cas["densidad_RH_tm3"])
+            phi_r = float(cas["angulo_friccion_deg"])
+            if W_r >= H_r:
+                UCS_r = (L_r * g_r * (2*H_r - W_r)) / (2*(H_r + L_r) - W_r)
+                form_r = "Mitchell Caso A: UCS = L·y·(2H-W)/[2(H+L)-W]"
+            else:
+                UCS_r = (g_r * H_r) / (1 - H_r / L_r)
+                form_r = "Mitchell Caso B: UCS = y·H/(1-H/L)"
+            alpha_r = math.radians(45 + phi_r / 2)
+            coh_r  = (g_r * H_r) / (2 * (H_r/L_r + math.tan(alpha_r)))
+            Wn_r   = W_r * H_r * (g_r * L_r - 2 * coh_r)
+            ucs_mean_r = float(ucs_r["Dia28_MPa"].mean())
+            factor_r   = ucs_mean_r / UCS_r if UCS_r > 0 else 0
+
+            geo_data = [
+                ["Parametro", "Valor"],
+                ["Longitud L (m)", f"{L_r:.1f}"],
+                ["Ancho W (m)", f"{W_r:.1f}"],
+                ["Altura H (m)", f"{H_r:.1f}"],
+                ["Densidad RH (t/m3)", f"{g_r:.2f}"],
+                ["Angulo friccion phi (deg)", f"{phi_r:.1f}"],
+                ["Formula aplicada", form_r],
+                ["UCS_RH requerido (MPa)", f"{UCS_r:.4f}"],
+                ["Cohesion c (MPa)", f"{coh_r:.4f}"],
+                ["Peso cuna Wn (t)", f"{Wn_r:.1f}"],
+                ["UCS promedio 28d ensayado (MPa)", f"{ucs_mean_r:.3f}"],
+                ["Factor UCS_ens/UCS_req", f"{factor_r:.2f}  |  {'CUMPLE' if factor_r >= 1 else 'NO CUMPLE'}"],
+            ]
+            story.append(make_tbl(geo_data, col_w=[10*cm, 6*cm]))
+
+            story.append(Spacer(1, 0.3*cm))
+            story.append(Paragraph("Detalle por especimen vs UCS_RH requerido:", S_BODY))
+            ucs_det_h = [["Especimen", "Dia 7 (MPa)", "Dia 14 (MPa)", "Dia 28 (MPa)", "Cumple?"]]
+            ucs_det_r = [[r["Especimen"], f"{r['Dia7_MPa']:.3f}", f"{r['Dia14_MPa']:.3f}",
+                          f"{r['Dia28_MPa']:.3f}", "SI" if r["Dia28_MPa"] >= UCS_r else "NO"]
+                         for _, r in ucs_r.iterrows()]
+            story.append(make_tbl(ucs_det_h + ucs_det_r,
+                                  col_w=[4.5*cm, 3*cm, 3*cm, 3.2*cm, 2.3*cm]))
+
+            story.append(Spacer(1, 0.3*cm))
+            story.append(Paragraph("Graficos Geomecanicos:", S_H3))
+            z_rep = np.linspace(0, H_r, 60)
+            pv_rep = g_r * z_rep
+            fig_geo_rep = go.Figure()
+            fig_geo_rep.add_trace(go.Scatter(x=pv_rep, y=z_rep, mode="lines", fill="tozerox",
+                fillcolor="rgba(232,98,42,0.2)", line=dict(color="#e8622a", width=3), name="Presion vertical"))
+            fig_geo_rep.add_vline(x=UCS_r, line_dash="dash", line_color="#10b981",
+                annotation_text=f"UCS_RH={UCS_r:.3f} MPa", annotation_font_color="#1a7a40")
+            fig_geo_rep.update_layout(**LP, height=490,
+                title=dict(text="Distribucion de Presion Vertical", font=dict(size=14)),
+                xaxis_title="Presion vertical (t/m2)", yaxis_title="Profundidad z (m)")
+
+            fig_bars_rep = go.Figure()
+            colores_rep = ["#10b981" if v >= UCS_r else "#e8622a" for v in vals_28]
+            fig_bars_rep.add_trace(go.Bar(x=especimenes, y=vals_28, marker_color=colores_rep,
+                text=[f"{v:.3f}" for v in vals_28], textposition="outside", name="UCS 28d"))
+            fig_bars_rep.add_hline(y=UCS_r, line_dash="dash", line_color="#f59e0b", line_width=2,
+                annotation_text=f"UCS_RH={UCS_r:.3f} MPa")
+            fig_bars_rep.update_layout(**LP, height=490,
+                title=dict(text="UCS 28 dias vs Requerimiento", font=dict(size=14)),
+                yaxis_title="UCS (MPa)")
+
+            try:
+                story.append(fig_to_rli(fig_geo_rep))
+                story.append(Spacer(1, 0.4*cm))
+                story.append(fig_to_rli(fig_bars_rep))
+            except Exception as e_fig:
+                story.append(Paragraph(f"Graficos no disponibles ({e_fig}). Instale kaleido.", S_NOTE))
+
+            # ── Section 5: Granulometry
+            story.append(PageBreak())
+            story.append(Paragraph("5. Analisis Granulometrico — ASTM D6913 / D2487 / D1140", S_H2))
+            story.append(hr())
+
+            gran_data = [
+                ["Parametro", "Valor"],
+                ["Masa seca especimen S,Md (g)", f"{masa_seca_total:.2f}"],
+                ["Masa retenida N200 tras lavado (g)", f"{masa_lavado:.2f}"],
+                ["% Finos por lavado (ASTM D1140)", f"{pct_finos_lavado:.2f}%"],
+                ["Clasificacion SUCS (ASTM D2487)", f"{sym_uscs} — {name_uscs}"],
+                ["D10 (mm)", f"{D10:.4f}" if D10 else "—"],
+                ["D30 (mm)", f"{D30:.4f}" if D30 else "—"],
+                ["D50 (mm)", f"{D50:.4f}" if D50 else "—"],
+                ["D60 (mm)", f"{D60:.4f}" if D60 else "—"],
+                ["D80 (mm)", f"{D80:.4f}" if D80 else "—"],
+                ["Cu = D60/D10", f"{Cu_calc:.2f}" if Cu_calc else "—"],
+                ["Cc = D30²/(D10·D60)", f"{Cc_calc:.2f}" if Cc_calc else "—"],
+                ["% Grava (>4.75mm)", f"{pct_grava:.1f}" if pct_grava is not None else "—"],
+                ["% Arena (0.075–4.75mm)", f"{pct_arena:.1f}" if pct_arena is not None else "—"],
+                ["% Finos (<0.075mm)", f"{pct_finos_sieve:.1f}"],
+                ["Limite Liquido LL (%)", f"{ll_val:.1f}" if ll_val > 0 else "No ensayado"],
+                ["Indice de Plasticidad PI (%)", f"{pi_val:.1f}" if pi_val > 0 else "No ensayado"],
+            ]
+            story.append(make_tbl(gran_data, col_w=[10*cm, 6*cm]))
+
+            story.append(Spacer(1, 0.3*cm))
+            story.append(Paragraph("Tabla de tamices — ASTM D6913:", S_H3))
+            gt_header = [["Tamiz", "Abertura (mm)", "CMR_N (g)", "MR_N (g)", "% Ret.", "% Pasante"]]
+            gt_rows = [[sieve_labels[i], f"{sieve_mm[i]}", f"{cmr_values[i]:.2f}",
+                        f"{mr_values[i]:.2f}",
+                        f"{cmr_values[i]/masa_seca_total*100:.1f}",
+                        f"{pp_values[i]:.1f}"]
+                       for i in range(len(sieve_labels))]
+            story.append(make_tbl(gt_header + gt_rows,
+                                  col_w=[2*cm, 2.8*cm, 2.5*cm, 2.5*cm, 2.1*cm, 2.1*cm]))
+
+            try:
+                fig_gran_rep = go.Figure()
+                fig_gran_rep.add_trace(go.Scatter(
+                    x=sieve_mm, y=pp_values, mode="lines+markers",
+                    line=dict(color="#e8622a", width=3), marker=dict(size=7),
+                    fill="tozeroy", fillcolor="rgba(232,98,42,0.1)", name="% Pasante"))
+                fig_gran_rep.add_vline(x=4.75, line_dash="dot", line_color="#a08060", line_width=1)
+                fig_gran_rep.add_vline(x=0.075, line_dash="dot", line_color="#a08060", line_width=1)
+                fig_gran_rep.update_layout(**LP, height=490,
+                    title=dict(text=f"Curva Granulometrica — {sym_uscs}", font=dict(size=14)),
+                    xaxis=dict(type="log", title="Diametro (mm)"),
+                    yaxis_title="% Pasante Acumulado")
+                story.append(Spacer(1, 0.3*cm))
+                story.append(fig_to_rli(fig_gran_rep))
+            except Exception as e_gr:
+                story.append(Paragraph(f"Grafico granulometrico no disponible: {e_gr}", S_NOTE))
+
+            # ── Footer
             story.append(Spacer(1, 0.6*cm))
+            story.append(hr())
             story.append(Paragraph(
-                "4.2  Comparativa UCS a 28 dias vs Requerimiento Geomecanico", S_BODY))
-            story.append(Spacer(1, 0.2*cm))
-            story.append(fig_to_rli(fig_g2, w_cm=15.5, h_cm=8.5))
-        except Exception as e_img:
-            story.append(Paragraph(
-                f"Nota: graficos no disponibles ({e_img}). "
-                "Instale kaleido con: pip install kaleido", S_NOTE))
+                f"Sistema RH v2.0  |  Generado: {hoy_str}  |  Bradoc Chambilla",
+                S_RIGHT))
 
-        # Pie
-        story.append(Spacer(1, 0.6*cm))
-        story.append(hr())
-        story.append(Paragraph(
-            f"Sistema RH v1.0  |  Generado: {hoy_str}  |  Bradoc Chambilla",
-            S_RIGHT))
+            doc.build(story)
+            buf_pdf.seek(0)
 
-        doc.build(story)
-        buf_pdf.seek(0)
+            fname_pdf = f"Reporte_RH_Completo_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            st.download_button(
+                label="⬇️ Descargar Reporte PDF Completo",
+                data=buf_pdf,
+                file_name=fname_pdf,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+            st.success(f"✔ Reporte generado: {fname_pdf} — haga clic arriba para descargar.")
 
-        fname = f"Reporte_Geomecanico_RH_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-        st.download_button(
-            label="⬇️ Descargar Reporte PDF",
-            data=buf_pdf,
-            file_name=fname,
-            mime="application/pdf",
-            use_container_width=True,
-        )
-        st.success(f"✔ Reporte generado: {fname}  — haga clic arriba para descargar.")
-
+        except ImportError:
+            st.error("❌ ReportLab no está instalado. Ejecute: pip install reportlab kaleido")
+        except Exception as e_pdf:
+            st.error(f"❌ Error al generar PDF: {e_pdf}")
+            import traceback
+            st.code(traceback.format_exc())
 
 # ─────────────────────────────────────────────
 #  FOOTER
@@ -976,8 +1436,8 @@ st.markdown(f"""
 </style>
 <div class="footer-box">
     <div class="footer-title">💧 Relleno Hidráulico · Sistema RH</div>
-    <div>Análisis técnico-geomecánico y diseño de relleno hidráulico</div>
+    <div>Análisis técnico-geomecánico · Granulometría ASTM D6913/D2487/D1140</div>
     <br>
-    <div>Versión 1.0 · Actualizado el {hoy} · Desarrollado por: <b>Bradoc Chambilla</b></div>
+    <div>Versión 2.0 · Actualizado el {hoy} · Desarrollado por: <b>Bradoc Chambilla</b></div>
 </div>
 """, unsafe_allow_html=True)
