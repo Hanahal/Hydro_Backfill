@@ -2,6 +2,8 @@ streamlit
 pandas
 numpy
 plotly
-kaleido
+kaleido==0.2.1
 matplotlib
 reportlab
+scipy
+openpyxl
